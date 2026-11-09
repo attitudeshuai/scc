@@ -17,10 +17,19 @@ func toSqlInsert(input chan *FileJob) string {
 		projectName = strings.Join(DirFilePaths, ",")
 	}
 
+	// Drain first so the inserts follow the canonical path order. The workers
+	// finish in a nondeterministic order, and emitting as jobs arrived made the
+	// script differ between runs even though the totals were unchanged.
+	var jobs []*FileJob
+	for res := range input {
+		jobs = append(jobs, res)
+	}
+	sortFileJobsByPath(jobs)
+
 	var sumCode, sumComplexity int64
 	str.WriteString("\nbegin transaction;")
 	count := 0
-	for res := range input {
+	for _, res := range jobs {
 		count++
 		sumCode += res.Code
 		sumComplexity += res.Complexity

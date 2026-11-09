@@ -3,6 +3,8 @@
 package processor
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -19,7 +21,7 @@ func ProcessResult() ([]LanguageSummary, error) {
 	ProcessConstants()
 	processFlags()
 	cleanVisitedPaths()
-	cleanDuplicates()
+	resetFileErrors()
 
 	if len(DirFilePaths) == 0 {
 		DirFilePaths = append(DirFilePaths, ".")
@@ -44,7 +46,9 @@ func ProcessResult() ([]LanguageSummary, error) {
 	}
 
 	SortBy = strings.ToLower(SortBy)
-	ctx := processorContext{remap: newRemapConfig(RemapAll, RemapUnknown)}
+	cancel, stopCancellation := beginScanCancellation()
+	defer stopCancellation()
+	ctx := processorContext{remap: newRemapConfig(RemapAll, RemapUnknown), cancel: cancel}
 
 	printDebugF("NumCPU: %d", runtime.NumCPU())
 	printDebugF("SortBy: %s", SortBy)
@@ -52,7 +56,7 @@ func ProcessResult() ([]LanguageSummary, error) {
 
 	potentialFilesQueue := make(chan []*gocodewalker.File, FileListQueueSize)
 	fileListQueue := make(chan *FileJob, FileListQueueSize)
-	fileSummaryJobQueue := make(chan *FileJob, FileSummaryJobQueueSize)
+	countedJobs := make(chan *FileJob, FileSummaryJobQueueSize)
 
 	fileWalker := gocodewalker.NewParallelFileWalker(dirPaths, nil)
 	fileWalker.SetFileBatchQueue(potentialFilesQueue)
@@ -84,19 +88,36 @@ func ProcessResult() ([]LanguageSummary, error) {
 		}
 	}
 
+	walkerDone := make(chan struct{})
+	go func() {
+		select {
+		case <-cancel.signal():
+			fileWalker.Terminate()
+		case <-walkerDone:
+		}
+	}()
 	go func() {
 		err := fileWalker.Start()
-		if err != nil {
+		close(walkerDone)
+		if err != nil && !errors.Is(err, gocodewalker.ErrTerminateWalk) {
 			printError(err.Error())
 		}
 	}()
 
-	startFileJobProducer(potentialFilesQueue, filePaths, excludePathRegexes, fileListQueue)
+	startFileJobProducer(potentialFilesQueue, filePaths, excludePathRegexes, fileListQueue, cancel)
 
-	go ctx.fileProcessorWorker(fileListQueue, fileSummaryJobQueue)
+	go ctx.fileProcessorWorker(fileListQueue, countedJobs)
+
+	fileSummaryJobQueue := applyDuplicateFilter(countedJobs)
 
 	language := aggregateLanguageSummary(fileSummaryJobQueue)
 	language = sortLanguageSummary(language)
+
+	// A canceled run still summarizes everything the workers had finished, so
+	// partial results come back; the error tells the caller they are partial.
+	if cancel.canceled() {
+		return language, context.Canceled
+	}
 
 	return language, nil
 }

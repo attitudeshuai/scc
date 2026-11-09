@@ -233,6 +233,10 @@ func toOpenMetricsFiles(input chan *FileJob) string {
 		files = append(files, file)
 	}
 
+	// Canonical path order so the emitted samples are byte-identical across
+	// worker counts instead of following the workers' completion order.
+	sortFileJobsByPath(files)
+
 	sb := &strings.Builder{}
 	for _, metric := range openMetricsMetrics {
 		sb.WriteString(metric.metadata)

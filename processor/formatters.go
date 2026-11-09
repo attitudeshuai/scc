@@ -33,39 +33,66 @@ func activeComplexity(complexity, cognitive int64) int64 {
 	return complexity
 }
 
+// sortSummaryFiles orders one language's per-file rows. Every branch ends in
+// the normalized-path tie-break so two rows equal on the chosen key still have
+// one fixed order: without it the rows a worker pool emitted in different
+// orders on different runs printed in different orders even after the primary
+// sort ran.
 func sortSummaryFiles(summary *LanguageSummary) {
+	// byPath is the final tie-break shared by every branch.
+	byPath := func(a, b *FileJob) int { return compareFileJobs(a, b) }
+
 	switch SortBy {
 	case "name", "names", "language", "languages", "lang", "langs":
-		slices.SortFunc(summary.Files, func(a, b *FileJob) int {
-			return strings.Compare(a.Location, b.Location)
-		})
+		slices.SortFunc(summary.Files, byPath)
 	case "line", "lines":
 		slices.SortFunc(summary.Files, func(a, b *FileJob) int {
-			return cmp.Compare(b.Lines, a.Lines)
+			if order := cmp.Compare(b.Lines, a.Lines); order != 0 {
+				return order
+			}
+			return byPath(a, b)
 		})
 	case "blank", "blanks":
 		slices.SortFunc(summary.Files, func(a, b *FileJob) int {
-			return cmp.Compare(b.Blank, a.Blank)
+			if order := cmp.Compare(b.Blank, a.Blank); order != 0 {
+				return order
+			}
+			return byPath(a, b)
 		})
 	case "code", "codes":
 		slices.SortFunc(summary.Files, func(a, b *FileJob) int {
-			return cmp.Compare(b.Code, a.Code)
+			if order := cmp.Compare(b.Code, a.Code); order != 0 {
+				return order
+			}
+			return byPath(a, b)
 		})
 	case "comment", "comments":
 		slices.SortFunc(summary.Files, func(a, b *FileJob) int {
-			return cmp.Compare(b.Comment, a.Comment)
+			if order := cmp.Compare(b.Comment, a.Comment); order != 0 {
+				return order
+			}
+			return byPath(a, b)
 		})
 	case "complexity", "complexitys", "comp":
 		slices.SortFunc(summary.Files, func(a, b *FileJob) int {
-			return cmp.Compare(activeComplexity(b.Complexity, b.Cognitive), activeComplexity(a.Complexity, a.Cognitive))
+			if order := cmp.Compare(activeComplexity(b.Complexity, b.Cognitive), activeComplexity(a.Complexity, a.Cognitive)); order != 0 {
+				return order
+			}
+			return byPath(a, b)
 		})
 	case "cognitive", "cognitives", "cog":
 		slices.SortFunc(summary.Files, func(a, b *FileJob) int {
-			return cmp.Compare(b.Cognitive, a.Cognitive)
+			if order := cmp.Compare(b.Cognitive, a.Cognitive); order != 0 {
+				return order
+			}
+			return byPath(a, b)
 		})
 	default:
 		slices.SortFunc(summary.Files, func(a, b *FileJob) int {
-			return cmp.Compare(b.Lines, a.Lines)
+			if order := cmp.Compare(b.Lines, a.Lines); order != 0 {
+				return order
+			}
+			return byPath(a, b)
 		})
 	}
 }
@@ -111,7 +138,11 @@ func getTabularWideBreak() string {
 // the rest of the formats emit a record per file, so all of those keep folding
 // job by job off the channel.
 func summariseInWorkers() bool {
-	if FormatMulti != "" || Files || MaxMean {
+	// Duplicate election happens on the summary channel after every worker has
+	// finished, so folding inside the workers would fold pre-dedup jobs and
+	// count files that the filter is about to drop. Route every job through the
+	// channel when --no-duplicates is on instead.
+	if FormatMulti != "" || Files || MaxMean || Duplicates {
 		return false
 	}
 
@@ -298,6 +329,12 @@ func aggregateLanguageSummary(input chan *FileJob) []LanguageSummary {
 		summary.ULOC = len(ulocLanguageCount[summary.Name]) // for #498
 		language = append(language, summary)
 	}
+
+	// Per-file records are appended in whatever order the workers happened to
+	// finish in. Put them in canonical path order so JSON/CSV/MCP emit the same
+	// bytes run after run whatever the worker count was. Summaries that keep no
+	// files hold a nil slice and pay nothing.
+	sortLanguageFilesByPath(language)
 
 	return language
 }

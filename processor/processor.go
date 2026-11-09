@@ -3,6 +3,7 @@
 package processor
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -181,6 +182,10 @@ type processorContext struct {
 	// into it instead of sending every file down the summary channel. Only the
 	// default and wide summaries can use it; see summariseInWorkers.
 	summary *sharedSummaryTotals
+	// cancel carries the run's stop signal to every worker. Nil means the run
+	// cannot be canceled, and a select on its signal then blocks forever, so
+	// contexts built without one behave exactly as before.
+	cancel *scanCancellation
 }
 
 func parseRemapRules(value string) []remapRule {
@@ -1067,7 +1072,7 @@ func Process() {
 	ProcessConstants()
 	processFlags()
 	cleanVisitedPaths()
-	cleanDuplicates()
+	resetFileErrors()
 
 	// Clean up any invalid arguments before setting everything up
 	if len(DirFilePaths) == 0 {
@@ -1194,7 +1199,9 @@ func Process() {
 	}
 
 	SortBy = strings.ToLower(SortBy)
-	ctx := processorContext{remap: newRemapConfig(RemapAll, RemapUnknown)}
+	cancel, stopCancellation := beginScanCancellation()
+	defer stopCancellation()
+	ctx := processorContext{remap: newRemapConfig(RemapAll, RemapUnknown), cancel: cancel}
 
 	printDebugF("NumCPU: %d", runtime.NumCPU())
 	printDebugF("SortBy: %s", SortBy)
@@ -1202,7 +1209,7 @@ func Process() {
 
 	potentialFilesQueue := make(chan []*gocodewalker.File, FileListQueueSize) // files that pass the .gitignore checks
 	fileListQueue := make(chan *FileJob, FileListQueueSize)                   // Files ready to be read from disk
-	fileSummaryJobQueue := make(chan *FileJob, FileSummaryJobQueueSize)       // Files ready to be summarised
+	countedJobs := make(chan *FileJob, FileSummaryJobQueueSize)               // files the workers have finished counting
 
 	fileWalker := gocodewalker.NewParallelFileWalker(dirPaths, nil)
 	fileWalker.SetFileBatchQueue(potentialFilesQueue)
@@ -1234,14 +1241,25 @@ func Process() {
 		}
 	}
 
+	walkerDone := make(chan struct{})
+	go func() {
+		select {
+		case <-cancel.signal():
+			// Stop the walk itself, not just the consumers: a canceled run
+			// must leave no goroutine walking a tree nobody is reading.
+			fileWalker.Terminate()
+		case <-walkerDone:
+		}
+	}()
 	go func() {
 		err := fileWalker.Start()
-		if err != nil {
+		close(walkerDone)
+		if err != nil && !errors.Is(err, gocodewalker.ErrTerminateWalk) {
 			printError(err.Error())
 		}
 	}()
 
-	startFileJobProducer(potentialFilesQueue, filePaths, excludePathRegexes, fileListQueue)
+	startFileJobProducer(potentialFilesQueue, filePaths, excludePathRegexes, fileListQueue, cancel)
 
 	// Where the output is one of the summaries that only ever prints per
 	// language totals, the workers add up their own results and merge once each
@@ -1253,7 +1271,11 @@ func Process() {
 		workerSummary = ctx.summary
 	}
 
-	go ctx.fileProcessorWorker(fileListQueue, fileSummaryJobQueue)
+	go ctx.fileProcessorWorker(fileListQueue, countedJobs)
+
+	// Deterministic duplicate election when --no-duplicates is on; a plain
+	// pass-through of the same channel otherwise.
+	fileSummaryJobQueue := applyDuplicateFilter(countedJobs)
 
 	result := fileSummarize(fileSummaryJobQueue)
 	if FileOutput == "" {
@@ -1266,5 +1288,23 @@ func Process() {
 			os.Exit(1)
 		}
 		fmt.Println("results written to " + FileOutput)
+	}
+
+	reportFileErrors(os.Stderr)
+}
+
+// reportFileErrors writes the run's unprocessable files to the given stream as
+// a section of their own, separate from the counted output on stdout. The
+// counted results never include these files, so stdout stays byte-identical
+// between runs; the errors are surfaced here rather than silently swallowed.
+func reportFileErrors(dst io.Writer) {
+	fileErrs := FileErrors()
+	if len(fileErrs) == 0 {
+		return
+	}
+
+	fmt.Fprintf(dst, "ERROR: %d file(s) could not be processed and were not counted:\n", len(fileErrs))
+	for _, e := range fileErrs {
+		fmt.Fprintf(dst, "  %s (%s): %s\n", e.Location, e.Op, e.Err)
 	}
 }

@@ -207,6 +207,7 @@ type FileJob struct {
 	ContentByteType      []byte `json:"-"` // Per-byte classification, allocated by CountStats when ClassifyContent is true
 	TrackComplexityLines bool   `json:"-"` // When true, CountStats populates ComplexityLine
 	cognitiveNesting     int    // transient per-line nesting level used during CountStats when Cognitive is enabled
+	contentHash          []byte // language-keyed content digest, populated only when Duplicates is on; drives the deterministic summary-stage dedupe
 }
 
 // MarshalJSON emits FileJob with the Cognitive field present (even when 0) while

@@ -66,17 +66,70 @@ var ByteOrderMarks = [][]byte{
 	{132, 49, 149, 51},    // GB-18030
 }
 
-var duplicates = CheckDuplicates{
-	hashes: make(map[int64][][]byte),
+// duplicateContentHash builds the key duplicate detection groups a file by:
+// blake2b over the whole content, keyed with the language so files that count
+// differently never land in the same set. It is computed once per counted file
+// when --no-duplicates is on and carried on the job for the summary-stage
+// filter.
+func duplicateContentHash(job *FileJob) []byte {
+	sum := blake2b.Sum256(job.Content)
+	keyed := blake2b.Sum256(append([]byte(job.Language+"\x00"), sum[:]...))
+	return keyed[:]
 }
 
-// cleanDuplicates resets the duplicate-detection hashes between runs. scc was
-// historically a one-shot CLI where this state died with the process, but the
-// long-lived MCP server calls ProcessResult once per tool call: without the
-// reset, every file in the second call matches a hash recorded by the first and
-// the whole result comes back empty.
-func cleanDuplicates() {
-	duplicates.Clear()
+// applyDuplicateFilter inserts the deterministic duplicate election between
+// the counting workers and every summarizer when duplicate detection is on.
+// It is a straight pass-through otherwise, so the common pipeline pays nothing.
+func applyDuplicateFilter(input chan *FileJob) chan *FileJob {
+	if !Duplicates {
+		return input
+	}
+
+	return dedupeDuplicateJobs(input)
+}
+
+// dedupeDuplicateJobs keeps exactly one job per duplicate set, electing the
+// member with the smallest normalized path. The election happens once, after
+// every worker has finished, so which file survives no longer depends on which
+// worker happened to finish first: the result is identical for every worker
+// count and on repeated runs. Members of one set count identically (the hash is
+// keyed on language), so every statistic is unchanged by the choice.
+func dedupeDuplicateJobs(input chan *FileJob) chan *FileJob {
+	output := make(chan *FileJob, FileSummaryJobQueueSize)
+
+	go func() {
+		winners := map[string]*FileJob{}
+		var passthrough []*FileJob
+
+		for job := range input {
+			if len(job.contentHash) == 0 {
+				// Defensive: every counted job carries a hash while duplicate
+				// detection is on, but never drop an unkeyed job silently.
+				passthrough = append(passthrough, job)
+				continue
+			}
+
+			key := string(job.contentHash)
+			current, ok := winners[key]
+			if !ok || compareFileJobs(job, current) < 0 {
+				winners[key] = job
+			}
+		}
+
+		jobs := make([]*FileJob, 0, len(winners)+len(passthrough))
+		jobs = append(jobs, passthrough...)
+		for _, job := range winners {
+			jobs = append(jobs, job)
+		}
+		sortFileJobsByPath(jobs)
+
+		for _, job := range jobs {
+			output <- job
+		}
+		close(output)
+	}()
+
+	return output
 }
 
 func checkForMatchSingle(currentByte byte, index int, endPoint int, matches []byte, fileJob *FileJob) bool {
@@ -1354,7 +1407,7 @@ func atLeastOneWorker(workers int) int {
 	return workers
 }
 
-func startFileJobProducer(potentialFilesQueue chan []*gocodewalker.File, filePaths []string, excludePathRegexes []*regexp.Regexp, fileListQueue chan *FileJob) {
+func startFileJobProducer(potentialFilesQueue chan []*gocodewalker.File, filePaths []string, excludePathRegexes []*regexp.Regexp, fileListQueue chan *FileJob, cancel *scanCancellation) {
 	var wg sync.WaitGroup
 
 	if potentialFilesQueue != nil {
@@ -1362,6 +1415,13 @@ func startFileJobProducer(potentialFilesQueue chan []*gocodewalker.File, filePat
 			wg.Go(func() {
 				for fis := range potentialFilesQueue {
 					for _, fi := range fis {
+						// Stop dispatching before the next stat once the run was
+						// canceled. Everything already in the queues still drains
+						// through the normal close path below.
+						if cancel.canceled() {
+							return
+						}
+
 						if pathExcluded(fi.Location, excludePathRegexes) {
 							continue
 						}
@@ -1377,12 +1437,20 @@ func startFileJobProducer(potentialFilesQueue chan []*gocodewalker.File, filePat
 						}
 
 						fileInfo, err := os.Lstat(fi.Location)
-						if err != nil || fileInfo.IsDir() {
+						if err != nil {
+							// A file that vanished or is unreadable is reported on
+							// its own but never stops the pool handling the rest.
+							scanFileErrors.add(fi.Location, "stat", err)
+							continue
+						}
+						if fileInfo.IsDir() {
 							continue
 						}
 
 						if fileJob := newFileJobGuessed(fi.Location, fi.Filename, fileInfo, guess); fileJob != nil {
-							fileListQueue <- fileJob
+							if !dispatchFileJob(fileListQueue, fileJob, cancel) {
+								return
+							}
 						}
 					}
 				}
@@ -1392,19 +1460,39 @@ func startFileJobProducer(potentialFilesQueue chan []*gocodewalker.File, filePat
 
 	go func() {
 		for _, f := range filePaths {
+			if cancel.canceled() {
+				break
+			}
+
 			fileInfo, err := os.Lstat(f)
 			if err != nil {
+				scanFileErrors.add(f, "stat", err)
 				continue
 			}
 
 			if fileJob := newFileJob(f, filepath.Base(f), fileInfo); fileJob != nil {
-				fileListQueue <- fileJob
+				if !dispatchFileJob(fileListQueue, fileJob, cancel) {
+					break
+				}
 			}
 		}
 
 		wg.Wait()
 		close(fileListQueue)
 	}()
+}
+
+// dispatchFileJob hands one built job to the counting stage. It returns false
+// when cancellation unwound the send instead, which tells the caller to stop
+// its worker: the queue's closer is the only goroutine allowed to close it, so
+// a canceled worker must leave rather than force another send through.
+func dispatchFileJob(fileListQueue chan *FileJob, fileJob *FileJob, cancel *scanCancellation) bool {
+	select {
+	case fileListQueue <- fileJob:
+		return true
+	case <-cancel.signal():
+		return false
+	}
 }
 
 // Reads and processes files from input chan in parallel, and sends results to
@@ -1428,7 +1516,21 @@ func (ctx processorContext) fileProcessorWorker(input chan *FileJob, output chan
 				defer func() { ctx.summary.mergeLocked(totals) }()
 			}
 
-			for job := range input {
+			for {
+				var job *FileJob
+				select {
+				case <-ctx.cancel.signal():
+					// Stop pulling work. The closer below still waits for every
+					// worker to leave and then closes output, so the summarizer
+					// drains what was already counted and ends on the close.
+					return
+				case next, ok := <-input:
+					if !ok {
+						return
+					}
+					job = next
+				}
+
 				atomic.CompareAndSwapInt64(&startTime, 0, makeTimestampMilli())
 
 				loc := job.Location
@@ -1454,10 +1556,18 @@ func (ctx processorContext) fileProcessorWorker(input chan *FileJob, output chan
 						if totals != nil {
 							totals.add(job)
 						} else {
-							output <- job
+							select {
+							case output <- job:
+							case <-ctx.cancel.signal():
+								return
+							}
 						}
 					}
 				} else {
+					// Recorded on the run-wide error list rather than only in
+					// verbose output, so a bad file is reported separately while
+					// the worker keeps processing every other file it was handed.
+					scanFileErrors.add(job.Location, "read", err)
 					printWarnF("error reading: %s %s", job.Location, err)
 				}
 			}
@@ -1513,35 +1623,21 @@ func (ctx processorContext) processFile(job *FileJob) bool {
 	CountStats(job)
 
 	if Duplicates {
-		// Over the whole of the file, not the bytes the counter happened to
-		// look at. The digest used to be fed a byte at a time from codeState,
-		// which skipped comments and whitespace, so two files with the same
-		// code and different comments hashed alike without counting alike.
-		// Which of them survived was then whichever worker got here first, and
-		// the totals moved from run to run: the same tree answered ten
-		// different line counts in ten runs.
+		// Record the content key on the job and leave the election to the
+		// duplicate filter on the summary channel. Filtering inside the workers
+		// used to keep whichever worker reached the registry first, which made
+		// the surviving path a scheduling accident. The filter elects the
+		// smallest normalized path once every worker has finished, so the
+		// answer is identical at every worker count.
 		//
-		// The language goes in with the bytes because the bytes alone do not
-		// say what they count as. examples/language holds test.tf and
-		// test.tofu, which are byte for byte the same file, and Terraform reads
-		// 23 branches in it where OpenTofu reads 25. Hashing content alone made
-		// them duplicates of each other and kept whichever arrived first, so
-		// one run in ten reported the other one's complexity. With the language
-		// in the digest a duplicate set is a set of files that count
-		// identically, which is what lets it not matter which one is kept.
-		sum := blake2b.Sum256(job.Content)
-		keyed := blake2b.Sum256(append([]byte(job.Language+"\x00"), sum[:]...))
-		jobHash := keyed[:]
-
-		duplicates.mux.Lock()
-		if duplicates.Check(job.Bytes, jobHash) {
-			printWarnF("skipping duplicate file: %s", job.Location)
-			duplicates.mux.Unlock()
-			return false
-		}
-
-		duplicates.Add(job.Bytes, jobHash)
-		duplicates.mux.Unlock()
+		// The hash covers the whole file rather than the bytes the counter
+		// happened to walk, and is keyed with the language: the bytes alone do
+		// not say what they count as. examples/language holds test.tf and
+		// test.tofu, byte for byte the same file, and Terraform reads 23
+		// branches in it where OpenTofu reads 25. Keying the language in keeps
+		// the two in separate duplicate sets, each set still counting
+		// identically whichever member wins.
+		job.contentHash = duplicateContentHash(job)
 	}
 
 	if IgnoreMinified && job.Minified {

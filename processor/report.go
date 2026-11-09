@@ -3,6 +3,7 @@
 package processor
 
 import (
+	"errors"
 	"fmt"
 	"html/template"
 	"os"
@@ -331,6 +332,9 @@ func CollectReportData(path string) (ReportData, error) {
 	if err != nil {
 		return ReportData{}, err
 	}
+	// Bad files are excluded from the report data; surface them separately so
+	// their omission is visible rather than silent, matching the CLI path.
+	reportFileErrors(os.Stderr)
 	data.Files = files
 	data.Summary = summary
 	data.Totals = totals
@@ -481,11 +485,14 @@ func walkAndAggregate(path string) ([]*FileJob, []LanguageSummary, Totals, error
 		filePaths = append(filePaths, fpath)
 	}
 
-	ctx := processorContext{remap: newRemapConfig(RemapAll, RemapUnknown)}
+	resetFileErrors()
+	cancel, stopCancellation := beginScanCancellation()
+	defer stopCancellation()
+	ctx := processorContext{remap: newRemapConfig(RemapAll, RemapUnknown), cancel: cancel}
 
 	potentialFilesQueue := make(chan []*gocodewalker.File, FileListQueueSize)
 	fileListQueue := make(chan *FileJob, FileListQueueSize)
-	fileSummaryJobQueue := make(chan *FileJob, FileSummaryJobQueueSize)
+	countedJobs := make(chan *FileJob, FileSummaryJobQueueSize)
 
 	if len(dirPaths) > 0 {
 		fileWalker := gocodewalker.NewParallelFileWalker(dirPaths, nil)
@@ -517,8 +524,18 @@ func walkAndAggregate(path string) ([]*FileJob, []LanguageSummary, Totals, error
 			}
 		}
 
+		walkerDone := make(chan struct{})
 		go func() {
-			if err := fileWalker.Start(); err != nil {
+			select {
+			case <-cancel.signal():
+				fileWalker.Terminate()
+			case <-walkerDone:
+			}
+		}()
+		go func() {
+			err := fileWalker.Start()
+			close(walkerDone)
+			if err != nil && !errors.Is(err, gocodewalker.ErrTerminateWalk) {
 				printError(err.Error())
 			}
 		}()
@@ -526,12 +543,16 @@ func walkAndAggregate(path string) ([]*FileJob, []LanguageSummary, Totals, error
 		// filePaths are deliberately not passed here: the report path has never
 		// counted loose files alongside directories and picking them up now would
 		// change its output.
-		startFileJobProducer(potentialFilesQueue, nil, excludePathRegexes, fileListQueue)
+		startFileJobProducer(potentialFilesQueue, nil, excludePathRegexes, fileListQueue, cancel)
 	} else {
-		startFileJobProducer(nil, filePaths, nil, fileListQueue)
+		startFileJobProducer(nil, filePaths, nil, fileListQueue, cancel)
 	}
 
-	go ctx.fileProcessorWorker(fileListQueue, fileSummaryJobQueue)
+	go ctx.fileProcessorWorker(fileListQueue, countedJobs)
+
+	// Deterministic duplicate election when --no-duplicates is on; otherwise
+	// the same channel passes straight through.
+	fileSummaryJobQueue := applyDuplicateFilter(countedJobs)
 
 	// Tee: as each FileJob arrives, append to the flat slice and forward to
 	// a buffered channel that aggregateLanguageSummary drains. We forward
@@ -564,10 +585,10 @@ func walkAndAggregate(path string) ([]*FileJob, []LanguageSummary, Totals, error
 	summary = sortLanguageSummary(summary)
 
 	// Ensure deterministic ordering of the flat Files slice — the worker
-	// pool can interleave file emissions.
-	sort.Slice(files, func(i, j int) bool {
-		return files[i].Location < files[j].Location
-	})
+	// pool can interleave file emissions. Use the same normalized-path
+	// ordering every other per-file output uses rather than a raw string
+	// comparison, so report mode is byte-identical across worker counts.
+	sortFileJobsByPath(files)
 
 	return files, summary, totals, nil
 }
