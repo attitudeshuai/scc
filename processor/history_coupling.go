@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	jsoniter "github.com/json-iterator/go"
@@ -528,6 +529,12 @@ func resolveCouplingTarget(repoPath, target string) (string, error) {
 
 	repo, err := openRepository(repoPath)
 	if err != nil {
+		// No repository at all: the walk degrades to the annotated empty
+		// window, so keep the cleaned target rather than failing the whole
+		// report. Any other open error still propagates.
+		if errors.Is(err, git.ErrRepositoryNotExists) {
+			return fallback, nil
+		}
 		return "", fmt.Errorf("open git repository: %w", err)
 	}
 	ref, err := repo.Head()
@@ -597,7 +604,7 @@ func runCouplingReport(repoPath string) error {
 	if FileOutput == "" {
 		fmt.Print(out)
 	} else {
-		if err := os.WriteFile(FileOutput, []byte(out), 0644); err != nil {
+		if err := writeOutputFile(FileOutput, "coupling/"+formatLabel(Format), out); err != nil {
 			return err
 		}
 		fmt.Println("results written to " + FileOutput)
@@ -640,6 +647,7 @@ func renderCouplingTabular(o *couplingObserver) string {
 
 	var sb strings.Builder
 	sb.WriteString(historyHeader("Change Coupling", o.window, wide))
+	sb.WriteString(historyNoticeLine(o.window.Notice))
 
 	// Weighted mode ranks by degree × complexity and reports a normalised 0–100
 	// Score in place of the raw Coupling %; the top (max-scoring) pair sits first
@@ -720,6 +728,7 @@ func renderCouplingCSV(o *couplingObserver) (string, error) {
 	var sb strings.Builder
 	sb.WriteString(formatWindowComment(o.window))
 	sb.WriteByte('\n')
+	sb.WriteString(historyNoticeComment(o.window.Notice))
 
 	w := csv.NewWriter(&sb)
 	_ = w.Write([]string{"FileA", "FileB", "Shared", "CommitsA", "CommitsB", "Degree"})
@@ -752,6 +761,8 @@ type couplingJSONPair struct {
 type couplingJSONDoc struct {
 	Report string             `json:"report"`
 	Window hotspotsJSONWindow `json:"window"`
+	// Notice is the uniform degradation marker; omitted on a complete walk.
+	Notice string             `json:"notice,omitempty"`
 	Pairs  []couplingJSONPair `json:"pairs"`
 }
 
@@ -762,6 +773,7 @@ func renderCouplingJSON(o *couplingObserver) (string, error) {
 func renderCouplingJSONLimited(o *couplingObserver, limit int) (string, error) {
 	doc := couplingJSONDoc{
 		Report: "coupling",
+		Notice: o.window.Notice,
 		Window: hotspotsJSONWindow{
 			Depth:   o.window.Depth,
 			Commits: o.window.Commits,
@@ -831,6 +843,7 @@ func renderCouplingForTabular(o *couplingObserver, target string) string {
 	// the banner and the table. The target file name is carried by the thin-target
 	// warning when it matters, and always by the CSV / JSON output.
 	sb.WriteString(historyHeader("Change Coupling", o.window, wide))
+	sb.WriteString(historyNoticeLine(o.window.Notice))
 
 	partners := o.partnersFor(target)
 
@@ -905,6 +918,7 @@ func renderCouplingForCSV(o *couplingObserver, target string) (string, error) {
 	var sb strings.Builder
 	sb.WriteString(formatWindowComment(o.window))
 	sb.WriteByte('\n')
+	sb.WriteString(historyNoticeComment(o.window.Notice))
 
 	w := csv.NewWriter(&sb)
 	_ = w.Write([]string{"Target", "Partner", "Shared", "TargetCommits", "PartnerCommits", "Degree", "Couple", "Reverse"})
@@ -937,11 +951,13 @@ type couplingForJSONPartner struct {
 }
 
 type couplingForJSONDoc struct {
-	Report        string                   `json:"report"`
-	Target        string                   `json:"target"`
-	TargetCommits int                      `json:"targetCommits"`
-	Window        hotspotsJSONWindow       `json:"window"`
-	Partners      []couplingForJSONPartner `json:"partners"`
+	Report        string             `json:"report"`
+	Target        string             `json:"target"`
+	TargetCommits int                `json:"targetCommits"`
+	Window        hotspotsJSONWindow `json:"window"`
+	// Notice is the uniform degradation marker; omitted on a complete walk.
+	Notice   string                   `json:"notice,omitempty"`
+	Partners []couplingForJSONPartner `json:"partners"`
 }
 
 func renderCouplingForJSON(o *couplingObserver, target string) (string, error) {
@@ -953,6 +969,7 @@ func renderCouplingForJSONLimited(o *couplingObserver, target string, limit int)
 		Report:        "coupling-for",
 		Target:        target,
 		TargetCommits: o.fc[target],
+		Notice:        o.window.Notice,
 		Window: hotspotsJSONWindow{
 			Depth:   o.window.Depth,
 			Commits: o.window.Commits,

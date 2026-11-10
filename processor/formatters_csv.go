@@ -65,42 +65,67 @@ func toCSVSummary(input chan *FileJob) string {
 	return b.String()
 }
 
+// csvFileNameTiebreak decides equal primary keys by full Provider path and
+// then Filename, matching the Location tie-break the tabular and HTML
+// by-file sorts use. Columns: 0 Language, 1 Provider (Location), 2 Filename.
+func csvFileNameTiebreak(a, b []string) int {
+	if order := strings.Compare(a[1], b[1]); order != 0 {
+		return order
+	}
+	return strings.Compare(a[2], b[2])
+}
+
+// withCSVNameTiebreak runs the primary comparator first and only applies the
+// stable name decision when the primary key is equal.
+func withCSVNameTiebreak(primary func(a, b []string) int) func(a, b []string) int {
+	return func(a, b []string) int {
+		if order := primary(a, b); order != 0 {
+			return order
+		}
+		return csvFileNameTiebreak(a, b)
+	}
+}
+
 func getCSVFilesSortFunc(sortBy string) func(a, b []string) int {
 	// Cater for the common case of adding plural even for those options that don't make sense
 	// as it's quite common for those who English is not a first language to make a simple mistake
 	switch sortBy {
 	case "name", "names":
+		// Filename first, then path, so same-name files stay deterministic.
 		return func(a, b []string) int {
-			return strings.Compare(a[2], b[2])
+			if order := strings.Compare(a[2], b[2]); order != 0 {
+				return order
+			}
+			return strings.Compare(a[1], b[1])
 		}
 	case "language", "languages", "lang", "langs":
-		return func(a, b []string) int {
+		return withCSVNameTiebreak(func(a, b []string) int {
 			return strings.Compare(a[0], b[0])
-		}
+		})
 	case "line", "lines":
-		return func(a, b []string) int {
+		return withCSVNameTiebreak(func(a, b []string) int {
 			i1, _ := strconv.ParseInt(a[3], 10, 64)
 			i2, _ := strconv.ParseInt(b[3], 10, 64)
 			return cmp.Compare(i2, i1)
-		}
+		})
 	case "blank", "blanks":
-		return func(a, b []string) int {
+		return withCSVNameTiebreak(func(a, b []string) int {
 			i1, _ := strconv.ParseInt(a[6], 10, 64)
 			i2, _ := strconv.ParseInt(b[6], 10, 64)
 			return cmp.Compare(i2, i1)
-		}
+		})
 	case "code", "codes":
-		return func(a, b []string) int {
+		return withCSVNameTiebreak(func(a, b []string) int {
 			i1, _ := strconv.ParseInt(a[4], 10, 64)
 			i2, _ := strconv.ParseInt(b[4], 10, 64)
 			return cmp.Compare(i2, i1)
-		}
+		})
 	case "comment", "comments":
-		return func(a, b []string) int {
+		return withCSVNameTiebreak(func(a, b []string) int {
 			i1, _ := strconv.ParseInt(a[5], 10, 64)
 			i2, _ := strconv.ParseInt(b[5], 10, 64)
 			return cmp.Compare(i2, i1)
-		}
+		})
 	case "complexity", "complexitys":
 		// The cognitive value is appended as column 10 only when --cognitive is
 		// set; sort by the active metric so the "complexity" key follows it.
@@ -108,32 +133,38 @@ func getCSVFilesSortFunc(sortBy string) func(a, b []string) int {
 		if Cognitive {
 			idx = 10
 		}
-		return func(a, b []string) int {
+		return withCSVNameTiebreak(func(a, b []string) int {
 			i1, _ := strconv.ParseInt(a[idx], 10, 64)
 			i2, _ := strconv.ParseInt(b[idx], 10, 64)
 			return cmp.Compare(i2, i1)
-		}
+		})
 	case "cognitive", "cognitives":
 		if !Cognitive {
 			// No cognitive column emitted without --cognitive; fall back to name.
 			return func(a, b []string) int {
-				return strings.Compare(a[2], b[2])
+				if order := strings.Compare(a[2], b[2]); order != 0 {
+					return order
+				}
+				return strings.Compare(a[1], b[1])
 			}
 		}
-		return func(a, b []string) int {
+		return withCSVNameTiebreak(func(a, b []string) int {
 			i1, _ := strconv.ParseInt(a[10], 10, 64)
 			i2, _ := strconv.ParseInt(b[10], 10, 64)
 			return cmp.Compare(i2, i1)
-		}
+		})
 	case "byte", "bytes":
-		return func(a, b []string) int {
+		return withCSVNameTiebreak(func(a, b []string) int {
 			i1, _ := strconv.ParseInt(a[8], 10, 64)
 			i2, _ := strconv.ParseInt(b[8], 10, 64)
 			return cmp.Compare(i2, i1)
-		}
+		})
 	default:
 		return func(a, b []string) int {
-			return strings.Compare(a[2], b[2])
+			if order := strings.Compare(a[2], b[2]); order != 0 {
+				return order
+			}
+			return strings.Compare(a[1], b[1])
 		}
 	}
 }

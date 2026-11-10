@@ -43,7 +43,7 @@ func runHotspotsReport(repoPath string) error {
 	if FileOutput == "" {
 		fmt.Print(out)
 	} else {
-		if err := os.WriteFile(FileOutput, []byte(out), 0644); err != nil {
+		if err := writeOutputFile(FileOutput, "hotspots/"+formatLabel(Format), out); err != nil {
 			return err
 		}
 		fmt.Println("results written to " + FileOutput)
@@ -253,6 +253,7 @@ func renderHotspotsTabular(o *hotspotsObserver) string {
 
 	var sb strings.Builder
 	sb.WriteString(historyHeader("Hotspots", o.window, wide))
+	sb.WriteString(historyNoticeLine(o.window.Notice))
 
 	printer := gmessage.NewPrinter(glanguage.Make(os.Getenv("LANG")))
 	if wide {
@@ -324,6 +325,7 @@ func renderHotspotsCSV(o *hotspotsObserver) (string, error) {
 	var sb strings.Builder
 	sb.WriteString(formatWindowComment(o.window))
 	sb.WriteByte('\n')
+	sb.WriteString(historyNoticeComment(o.window.Notice))
 
 	w := csv.NewWriter(&sb)
 	_ = w.Write([]string{
@@ -376,6 +378,8 @@ type hotspotsJSONWindow struct {
 type hotspotsJSONDoc struct {
 	Report string             `json:"report"`
 	Window hotspotsJSONWindow `json:"window"`
+	// Notice is the uniform degradation marker; omitted on a complete walk.
+	Notice string             `json:"notice,omitempty"`
 	Files  []hotspotsJSONFile `json:"files"`
 }
 
@@ -389,6 +393,7 @@ func renderHotspotsJSON(o *hotspotsObserver) (string, error) {
 func renderHotspotsJSONLimited(o *hotspotsObserver, limit int) (string, error) {
 	doc := hotspotsJSONDoc{
 		Report: "hotspots",
+		Notice: o.window.Notice,
 		Window: hotspotsJSONWindow{
 			Depth:   o.window.Depth,
 			Commits: o.window.Commits,
@@ -423,6 +428,9 @@ func renderHotspotsJSONLimited(o *hotspotsObserver, limit int) (string, error) {
 	return string(b), nil
 }
 
+// round1 keeps the history renderers' local name for the shared one-decimal
+// rule; it is roundTo1 so history JSON and the tabular views round exactly
+// the way every other format does.
 func round1(f float64) float64 {
-	return float64(int64(f*10+0.5)) / 10
+	return roundTo1(f)
 }

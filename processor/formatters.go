@@ -33,6 +33,14 @@ func activeComplexity(complexity, cognitive int64) int64 {
 	return complexity
 }
 
+// compareFileLocation is the universal final tie-break for per-file sorts:
+// every metric key sorts first, then equal keys are decided by Location so
+// the order never depends on channel arrival order and repeated runs are
+// byte-identical.
+func compareFileLocation(a, b *FileJob) int {
+	return strings.Compare(a.Location, b.Location)
+}
+
 func sortSummaryFiles(summary *LanguageSummary) {
 	switch SortBy {
 	case "name", "names", "language", "languages", "lang", "langs":
@@ -41,31 +49,52 @@ func sortSummaryFiles(summary *LanguageSummary) {
 		})
 	case "line", "lines":
 		slices.SortFunc(summary.Files, func(a, b *FileJob) int {
-			return cmp.Compare(b.Lines, a.Lines)
+			if order := cmp.Compare(b.Lines, a.Lines); order != 0 {
+				return order
+			}
+			return compareFileLocation(a, b)
 		})
 	case "blank", "blanks":
 		slices.SortFunc(summary.Files, func(a, b *FileJob) int {
-			return cmp.Compare(b.Blank, a.Blank)
+			if order := cmp.Compare(b.Blank, a.Blank); order != 0 {
+				return order
+			}
+			return compareFileLocation(a, b)
 		})
 	case "code", "codes":
 		slices.SortFunc(summary.Files, func(a, b *FileJob) int {
-			return cmp.Compare(b.Code, a.Code)
+			if order := cmp.Compare(b.Code, a.Code); order != 0 {
+				return order
+			}
+			return compareFileLocation(a, b)
 		})
 	case "comment", "comments":
 		slices.SortFunc(summary.Files, func(a, b *FileJob) int {
-			return cmp.Compare(b.Comment, a.Comment)
+			if order := cmp.Compare(b.Comment, a.Comment); order != 0 {
+				return order
+			}
+			return compareFileLocation(a, b)
 		})
 	case "complexity", "complexitys", "comp":
 		slices.SortFunc(summary.Files, func(a, b *FileJob) int {
-			return cmp.Compare(activeComplexity(b.Complexity, b.Cognitive), activeComplexity(a.Complexity, a.Cognitive))
+			if order := cmp.Compare(activeComplexity(b.Complexity, b.Cognitive), activeComplexity(a.Complexity, a.Cognitive)); order != 0 {
+				return order
+			}
+			return compareFileLocation(a, b)
 		})
 	case "cognitive", "cognitives", "cog":
 		slices.SortFunc(summary.Files, func(a, b *FileJob) int {
-			return cmp.Compare(b.Cognitive, a.Cognitive)
+			if order := cmp.Compare(b.Cognitive, a.Cognitive); order != 0 {
+				return order
+			}
+			return compareFileLocation(a, b)
 		})
 	default:
 		slices.SortFunc(summary.Files, func(a, b *FileJob) int {
-			return cmp.Compare(b.Lines, a.Lines)
+			if order := cmp.Compare(b.Lines, a.Lines); order != 0 {
+				return order
+			}
+			return compareFileLocation(a, b)
 		})
 	}
 }
@@ -231,11 +260,12 @@ func fileSummarizeMulti(input chan *FileJob) string {
 				str.WriteString(val)
 				str.WriteString("\n")
 			} else {
-				err := os.WriteFile(t[1], []byte(val), 0600)
-				if err != nil {
-					// A failed write must not report success: match the -o
-					// path and exit non-zero with the reason on stderr.
-					fmt.Fprintf(os.Stderr, "%s unable to be written to for format %s: %s\n", t[1], t[0], err)
+				// A failed write must not report success: match the -o
+				// path and exit non-zero with the reason on stderr. The
+				// shared writer keeps the message and chunking identical
+				// across every output format.
+				if err := writeOutputFile(t[1], strings.ToLower(t[0]), val); err != nil {
+					fmt.Fprintln(os.Stderr, err)
 					os.Exit(1)
 				}
 			}

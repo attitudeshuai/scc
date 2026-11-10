@@ -196,7 +196,7 @@ func runLanguagesTimelineReport(repoPath string) error {
 	if FileOutput == "" {
 		fmt.Print(out)
 	} else {
-		if err := os.WriteFile(FileOutput, []byte(out), 0644); err != nil {
+		if err := writeOutputFile(FileOutput, "languages-timeline/"+formatLabel(Format), out); err != nil {
 			return err
 		}
 		fmt.Println("results written to " + FileOutput)
@@ -229,6 +229,7 @@ func renderLanguagesTimelineTabular(o *historyLanguagesObserver) string {
 
 	var sb strings.Builder
 	sb.WriteString(historyHeader("Languages", o.window, wide))
+	sb.WriteString(historyNoticeLine(o.window.Notice))
 
 	p := gmessage.NewPrinter(glanguage.Make(os.Getenv("LANG")))
 
@@ -277,6 +278,7 @@ func renderLanguagesTimelineCSV(o *historyLanguagesObserver) (string, error) {
 	var sb strings.Builder
 	sb.WriteString(formatWindowComment(o.window))
 	sb.WriteByte('\n')
+	sb.WriteString(historyNoticeComment(o.window.Notice))
 	_, _ = fmt.Fprintf(&sb, "# buckets: %d\n", o.bucket.N)
 
 	w := csv.NewWriter(&sb)
@@ -325,8 +327,10 @@ type languagesTimelineJSONWindow struct {
 }
 
 type languagesTimelineJSONDoc struct {
-	Report    string                      `json:"report"`
-	Window    languagesTimelineJSONWindow `json:"window"`
+	Report string                      `json:"report"`
+	Window languagesTimelineJSONWindow `json:"window"`
+	// Notice is the uniform degradation marker; omitted on a complete walk.
+	Notice    string                      `json:"notice,omitempty"`
 	Buckets   int                         `json:"buckets"`
 	Languages []languagesTimelineJSONLang `json:"languages"`
 }
@@ -334,6 +338,7 @@ type languagesTimelineJSONDoc struct {
 func renderLanguagesTimelineJSON(o *historyLanguagesObserver) (string, error) {
 	doc := languagesTimelineJSONDoc{
 		Report: "languages-timeline",
+		Notice: o.window.Notice,
 		Window: languagesTimelineJSONWindow{
 			Depth:   o.window.Depth,
 			Commits: o.window.Commits,

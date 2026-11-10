@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/filemode"
 	fdiff "github.com/go-git/go-git/v5/plumbing/format/diff"
@@ -69,6 +70,11 @@ type HistoryWindow struct {
 	From    time.Time
 	To      time.Time
 	Head    plumbing.Hash
+	// Notice carries the uniform degradation marker when the walk could not
+	// use full git history (no repository, no commits, shallow boundary).
+	// Empty for a complete walk; every renderer annotates its output with
+	// the same sentence when it is set.
+	Notice string
 }
 
 // HeadFile is one file in the HEAD tree, classified by scc's engine.
@@ -201,6 +207,16 @@ func runHistory(repoPath string, observer CommitObserver) (HistoryWindow, error)
 
 	repo, err := openRepository(repoPath)
 	if err != nil {
+		// A path that is not inside any git repository is a degradation, not
+		// a failure: every history analysis finalises an empty window with
+		// the uniform no-git notice so callers (CLI, MCP, report) get an
+		// annotated empty result instead of a non-zero exit. Unexpected open
+		// errors still propagate.
+		if errors.Is(err, git.ErrRepositoryNotExists) {
+			printWarnF("history: no git repository at %s, degrading to an empty %T", repoPath, observer)
+			observer.Finalise(HistoryWindow{Notice: NoticeNoGit}, emptySnapshot())
+			return HistoryWindow{Notice: NoticeNoGit}, nil
+		}
 		return HistoryWindow{}, fmt.Errorf("open git repository: %w", err)
 	}
 
@@ -217,8 +233,8 @@ func runHistory(repoPath string, observer CommitObserver) (HistoryWindow, error)
 		// silence is what made the worktree case (issue #765) hard to spot.
 		if errors.Is(err, plumbing.ErrReferenceNotFound) {
 			printWarnF("history: cannot resolve HEAD in %s, treating as an empty repository", repoPath)
-			observer.Finalise(HistoryWindow{}, emptySnapshot())
-			return HistoryWindow{}, nil
+			observer.Finalise(HistoryWindow{Notice: NoticeNoCommits}, emptySnapshot())
+			return HistoryWindow{Notice: NoticeNoCommits}, nil
 		}
 		return HistoryWindow{}, fmt.Errorf("read HEAD: %w", err)
 	}
@@ -230,6 +246,10 @@ func runHistory(repoPath string, observer CommitObserver) (HistoryWindow, error)
 	// ParentHashes[0] matches the README's `git log --first-parent` semantics
 	// and keeps every diff applied to the state it was computed against.
 	collected := make([]*object.Commit, 0)
+	// shallow is set only when the walk stopped on a missing parent object.
+	// A depth cap or a root commit ends the walk the same way but is not a
+	// degradation, so they must not be marked.
+	shallow := false
 	commit, err := repo.CommitObject(head.Hash())
 	if err != nil {
 		return HistoryWindow{}, fmt.Errorf("walk log: %w", err)
@@ -245,6 +265,7 @@ func runHistory(repoPath string, observer CommitObserver) (HistoryWindow, error)
 			// walked. This is the same "no more history to walk" endpoint as a
 			// root commit's zero parents, reached via a missing object instead.
 			if errors.Is(err, plumbing.ErrObjectNotFound) {
+				shallow = true
 				break
 			}
 			if err != nil {
@@ -262,8 +283,15 @@ func runHistory(repoPath string, observer CommitObserver) (HistoryWindow, error)
 	}
 
 	if len(collected) == 0 {
-		observer.Finalise(HistoryWindow{Head: head.Hash()}, emptySnapshot())
-		return HistoryWindow{Head: head.Hash()}, nil
+		notice := NoticeNoCommits
+		if shallow {
+			// A depth-1 shallow clone: the sole commit's parent is absent, so
+			// nothing was observable even though history exists beyond the
+			// shallow boundary.
+			notice = NoticeShallow
+		}
+		observer.Finalise(HistoryWindow{Head: head.Hash(), Notice: notice}, emptySnapshot())
+		return HistoryWindow{Head: head.Hash(), Notice: notice}, nil
 	}
 
 	window := HistoryWindow{
@@ -272,6 +300,9 @@ func runHistory(repoPath string, observer CommitObserver) (HistoryWindow, error)
 		From:    collected[len(collected)-1].Author.When,
 		To:      collected[0].Author.When,
 		Head:    head.Hash(),
+	}
+	if shallow {
+		window.Notice = NoticeShallow
 	}
 
 	ignore, err := buildHistoryIgnore(repo, head.Hash())

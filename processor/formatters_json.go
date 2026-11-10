@@ -18,11 +18,12 @@ func addLanguagePercentages(language []LanguageSummary) {
 		sumBytes += l.Bytes
 	}
 
+	// One shared, already-rounded percentage for every format. The tabular
+	// views print percentRounded with %.1f, so JSON carries the identical
+	// number rather than a full-precision float64 a consumer could round
+	// differently. Rounding here also keeps the seven pointers distinct.
 	percent := func(value, total int64) *float64 {
-		var p float64
-		if total != 0 {
-			p = float64(value) / float64(total) * 100
-		}
+		p := percentRounded(value, total)
 		return &p
 	}
 

@@ -5,6 +5,7 @@ package processor
 import (
 	"fmt"
 	"html"
+	"slices"
 	"strings"
 
 	"go.yaml.in/yaml/v2"
@@ -232,6 +233,16 @@ func toOpenMetricsFiles(input chan *FileJob) string {
 	for file := range input {
 		files = append(files, file)
 	}
+
+	// The channel order reflects worker scheduling and changes run to run,
+	// which made the per-file exposition nondeterministic. Pin one order by
+	// Location, the same final tie-break the other by-file formats use.
+	slices.SortFunc(files, func(a, b *FileJob) int {
+		if order := strings.Compare(a.Location, b.Location); order != 0 {
+			return order
+		}
+		return strings.Compare(a.Language, b.Language)
+	})
 
 	sb := &strings.Builder{}
 	for _, metric := range openMetricsMetrics {

@@ -383,7 +383,7 @@ func runAuthorsReport(repoPath string) error {
 	if FileOutput == "" {
 		fmt.Print(out)
 	} else {
-		if err := os.WriteFile(FileOutput, []byte(out), 0644); err != nil {
+		if err := writeOutputFile(FileOutput, "by-author/"+formatLabel(Format), out); err != nil {
 			return err
 		}
 		fmt.Println("results written to " + FileOutput)
@@ -418,6 +418,7 @@ func renderAuthorsTabular(o *historyAuthorsObserver) string {
 
 	var sb strings.Builder
 	sb.WriteString(historyHeader("Authors", o.window, wide))
+	sb.WriteString(historyNoticeLine(o.window.Notice))
 
 	p := gmessage.NewPrinter(glanguage.Make(os.Getenv("LANG")))
 
@@ -585,6 +586,7 @@ func renderAuthorsCSV(o *historyAuthorsObserver) (string, error) {
 	var sb strings.Builder
 	sb.WriteString(formatWindowComment(o.window))
 	sb.WriteByte('\n')
+	sb.WriteString(historyNoticeComment(o.window.Notice))
 
 	w := csv.NewWriter(&sb)
 	_ = w.Write([]string{
@@ -641,8 +643,10 @@ type authorsJSONWindow struct {
 }
 
 type authorsJSONDoc struct {
-	Report    string              `json:"report"`
-	Window    authorsJSONWindow   `json:"window"`
+	Report string            `json:"report"`
+	Window authorsJSONWindow `json:"window"`
+	// Notice is the uniform degradation marker; omitted on a complete walk.
+	Notice    string              `json:"notice,omitempty"`
 	BusFactor int                 `json:"busFactor"`
 	Authors   []authorsJSONAuthor `json:"authors"`
 }
@@ -650,6 +654,7 @@ type authorsJSONDoc struct {
 func renderAuthorsJSON(o *historyAuthorsObserver) (string, error) {
 	doc := authorsJSONDoc{
 		Report: "authors",
+		Notice: o.window.Notice,
 		Window: authorsJSONWindow{
 			Depth:   o.window.Depth,
 			Commits: o.window.Commits,

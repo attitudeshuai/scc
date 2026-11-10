@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -17,10 +18,22 @@ func toSqlInsert(input chan *FileJob) string {
 		projectName = strings.Join(DirFilePaths, ",")
 	}
 
+	// The channel carries jobs in worker-scheduling order, which changes run
+	// to run; an insert script that followed it was not byte-identical across
+	// repeated runs. Drain and pin one Location order, the same final
+	// tie-break the other per-file formats use.
+	var jobs []*FileJob
+	for res := range input {
+		jobs = append(jobs, res)
+	}
+	slices.SortFunc(jobs, func(a, b *FileJob) int {
+		return strings.Compare(a.Location, b.Location)
+	})
+
 	var sumCode, sumComplexity int64
 	str.WriteString("\nbegin transaction;")
 	count := 0
-	for res := range input {
+	for _, res := range jobs {
 		count++
 		sumCode += res.Code
 		sumComplexity += res.Complexity

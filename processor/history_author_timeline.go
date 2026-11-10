@@ -201,7 +201,7 @@ func runAuthorTimelineReport(repoPath string) error {
 	if FileOutput == "" {
 		fmt.Print(out)
 	} else {
-		if err := os.WriteFile(FileOutput, []byte(out), 0644); err != nil {
+		if err := writeOutputFile(FileOutput, "author-timeline/"+formatLabel(Format), out); err != nil {
 			return err
 		}
 		fmt.Println("results written to " + FileOutput)
@@ -235,6 +235,7 @@ func renderAuthorTimelineTabular(o *historyAuthorTimelineObserver) string {
 
 	var sb strings.Builder
 	sb.WriteString(historyHeader("Authors", o.window, wide))
+	sb.WriteString(historyNoticeLine(o.window.Notice))
 
 	p := gmessage.NewPrinter(glanguage.Make(os.Getenv("LANG")))
 
@@ -364,6 +365,7 @@ func renderAuthorTimelineCSV(o *historyAuthorTimelineObserver) (string, error) {
 	var sb strings.Builder
 	sb.WriteString(formatWindowComment(o.window))
 	sb.WriteByte('\n')
+	sb.WriteString(historyNoticeComment(o.window.Notice))
 	_, _ = fmt.Fprintf(&sb, "# buckets: %d\n", o.bucket.N)
 
 	w := csv.NewWriter(&sb)
@@ -410,8 +412,10 @@ type authorTimelineJSONWindow struct {
 }
 
 type authorTimelineJSONDoc struct {
-	Report  string                     `json:"report"`
-	Window  authorTimelineJSONWindow   `json:"window"`
+	Report string                   `json:"report"`
+	Window authorTimelineJSONWindow `json:"window"`
+	// Notice is the uniform degradation marker; omitted on a complete walk.
+	Notice  string                     `json:"notice,omitempty"`
 	Buckets int                        `json:"buckets"`
 	Authors []authorTimelineJSONAuthor `json:"authors"`
 }
@@ -419,6 +423,7 @@ type authorTimelineJSONDoc struct {
 func renderAuthorTimelineJSON(o *historyAuthorTimelineObserver) (string, error) {
 	doc := authorTimelineJSONDoc{
 		Report: "author-timeline",
+		Notice: o.window.Notice,
 		Window: authorTimelineJSONWindow{
 			Depth:   o.window.Depth,
 			Commits: o.window.Commits,

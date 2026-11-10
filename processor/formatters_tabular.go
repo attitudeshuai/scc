@@ -109,12 +109,12 @@ func fileSummarizeLong(input chan *FileJob) string {
 		if Percent {
 			_, _ = p.Fprintf(str,
 				tabularWideFormatBodyPercent,
-				pct(summary.Count, sumFiles),
-				pct(summary.Lines, sumLines),
-				pct(summary.Blank, sumBlank),
-				pct(summary.Comment, sumComment),
-				pct(summary.Code, sumCode),
-				pct(summary.Complexity, sumComplexity),
+				percentRounded(summary.Count, sumFiles),
+				percentRounded(summary.Lines, sumLines),
+				percentRounded(summary.Blank, sumBlank),
+				percentRounded(summary.Comment, sumComment),
+				percentRounded(summary.Code, sumCode),
+				percentRounded(summary.Complexity, sumComplexity),
 			)
 
 			if !UlocMode {
@@ -317,21 +317,21 @@ func fileSummarizeShort(input chan *FileJob) string {
 			if !Complexity {
 				_, _ = p.Fprintf(str,
 					tabularShortPercentLanguageFormatBody,
-					pct(summary.Count, sumFiles),
-					pct(summary.Lines, sumLines),
-					pct(summary.Blank, sumBlank),
-					pct(summary.Comment, sumComment),
-					pct(summary.Code, sumCode),
-					pct(activeComplexity(summary.Complexity, summary.Cognitive), activeComplexity(sumComplexity, sumCognitive)),
+					percentRounded(summary.Count, sumFiles),
+					percentRounded(summary.Lines, sumLines),
+					percentRounded(summary.Blank, sumBlank),
+					percentRounded(summary.Comment, sumComment),
+					percentRounded(summary.Code, sumCode),
+					percentRounded(activeComplexity(summary.Complexity, summary.Cognitive), activeComplexity(sumComplexity, sumCognitive)),
 				)
 			} else {
 				_, _ = p.Fprintf(str,
 					tabularShortPercentLanguageFormatBodyNoComplexity,
-					pct(summary.Count, sumFiles),
-					pct(summary.Lines, sumLines),
-					pct(summary.Blank, sumBlank),
-					pct(summary.Comment, sumComment),
-					pct(summary.Code, sumCode),
+					percentRounded(summary.Count, sumFiles),
+					percentRounded(summary.Lines, sumLines),
+					percentRounded(summary.Blank, sumBlank),
+					percentRounded(summary.Comment, sumComment),
+					percentRounded(summary.Code, sumCode),
 				)
 			}
 
